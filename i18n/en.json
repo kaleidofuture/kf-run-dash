@@ -69,5 +69,6 @@
   "hr_zone_5_name": "Maximum",
   "pace_vs_hr_title": "Pace vs Heart Rate Scatter",
   "pace_vs_hr_note": "Each point represents a 1km segment's average pace and heart rate. Lower pace values mean faster running.",
-  "no_pace_hr_data": "Both pace and heart rate data are required"
+  "no_pace_hr_data": "Both pace and heart rate data are required",
+  "report_issue": "Report an issue"
 }
