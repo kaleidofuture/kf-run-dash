@@ -752,4 +752,4 @@ else:
     st.info(t("no_file"))
 
 # --- Footer ---
-render_footer(libraries=["fitparse", "gpxpy", "folium", "streamlit-folium"])
+render_footer(libraries=["fitparse", "gpxpy", "folium", "streamlit-folium"], repo_name="kf-run-dash")
