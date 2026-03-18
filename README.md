@@ -1,3 +1,14 @@
+---
+title: kf-run-dash
+emoji: 🚀
+colorFrom: green
+colorTo: blue
+sdk: streamlit
+sdk_version: 1.44.1
+app_file: app.py
+pinned: false
+---
+
 # KF-RunDash
 
 > GPX/FITファイルからランニングデータを分析・可視化するアプリ。
