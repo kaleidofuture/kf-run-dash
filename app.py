@@ -178,6 +178,142 @@ def compute_metrics(points: list[dict]) -> dict:
     }
 
 
+def compute_km_splits(metrics: dict) -> list[dict]:
+    """Compute per-km splits with pace, HR, elevation, and GAP."""
+    if not metrics["paces"]:
+        return []
+
+    km_splits = {}
+    for p in metrics["paces"]:
+        km = int(p["dist"] / 1000)
+        if km not in km_splits:
+            km_splits[km] = {"paces": [], "hrs": [], "elevations": []}
+        km_splits[km]["paces"].append(p["pace"])
+
+    for h in metrics["heart_rates"]:
+        km = int(h["dist"] / 1000)
+        if km in km_splits:
+            km_splits[km]["hrs"].append(h["hr"])
+
+    # Compute elevation change per km for GAP calculation
+    points = metrics["points"]
+    distances = metrics["distances"]
+    for i in range(1, len(points)):
+        km = int(distances[i] / 1000)
+        if km in km_splits:
+            km_splits[km]["elevations"].append(
+                (points[i]["elevation"] - points[i - 1]["elevation"],
+                 distances[i] - distances[i - 1])
+            )
+
+    result = []
+    for km in sorted(km_splits.keys()):
+        data = km_splits[km]
+        avg_pace = sum(data["paces"]) / len(data["paces"])
+        avg_hr = sum(data["hrs"]) / len(data["hrs"]) if data["hrs"] else None
+
+        # Calculate grade for GAP
+        total_elev_change = sum(e[0] for e in data["elevations"])
+        total_horiz_dist = sum(e[1] for e in data["elevations"])
+        grade_pct = (total_elev_change / total_horiz_dist * 100) if total_horiz_dist > 0 else 0
+        elev_change = total_elev_change
+
+        # GAP = actual_pace / (1 + 0.033 * grade_percent)
+        gap_factor = 1 + 0.033 * grade_pct
+        gap = avg_pace / gap_factor if gap_factor > 0 else avg_pace
+
+        result.append({
+            "km": km + 1,
+            "pace": avg_pace,
+            "hr": round(avg_hr) if avg_hr else None,
+            "elev_change": round(elev_change, 1),
+            "grade_pct": round(grade_pct, 1),
+            "gap": gap,
+        })
+
+    return result
+
+
+def find_best_splits(metrics: dict) -> dict:
+    """Find fastest 1km and 5km segments from the run data."""
+    points = metrics["points"]
+    distances = metrics["distances"]
+    best = {"1km": None, "5km": None}
+
+    if len(points) < 2:
+        return best
+
+    # For each target distance, use a sliding window approach
+    for target_m, key in [(1000, "1km"), (5000, "5km")]:
+        if distances[-1] < target_m:
+            continue
+
+        best_time = float("inf")
+        best_start_km = None
+        best_end_km = None
+
+        j = 0
+        for i in range(len(points)):
+            # Advance j until we have at least target_m distance from point i
+            while j < len(points) - 1 and (distances[j] - distances[i]) < target_m:
+                j += 1
+
+            if (distances[j] - distances[i]) >= target_m:
+                if points[i]["time"] and points[j]["time"]:
+                    elapsed = (points[j]["time"] - points[i]["time"]).total_seconds()
+                    if elapsed > 0 and elapsed < best_time:
+                        best_time = elapsed
+                        best_start_km = distances[i] / 1000
+                        best_end_km = distances[j] / 1000
+
+        if best_time < float("inf"):
+            pace = best_time / 60 / (target_m / 1000)  # min/km
+            best[key] = {
+                "time_seconds": best_time,
+                "pace": pace,
+                "start_km": round(best_start_km, 2),
+                "end_km": round(best_end_km, 2),
+            }
+
+    return best
+
+
+def compute_hr_zones(heart_rates: list[dict], max_hr: int) -> list[dict]:
+    """Compute time/count in each heart rate zone."""
+    zones = [
+        {"zone": 1, "min_pct": 50, "max_pct": 60, "count": 0},
+        {"zone": 2, "min_pct": 60, "max_pct": 70, "count": 0},
+        {"zone": 3, "min_pct": 70, "max_pct": 80, "count": 0},
+        {"zone": 4, "min_pct": 80, "max_pct": 90, "count": 0},
+        {"zone": 5, "min_pct": 90, "max_pct": 100, "count": 0},
+    ]
+
+    below_count = 0
+    total_count = 0
+
+    for h in heart_rates:
+        hr = h["hr"]
+        pct = (hr / max_hr) * 100
+        total_count += 1
+        assigned = False
+        for z in zones:
+            if z["min_pct"] <= pct < z["max_pct"]:
+                z["count"] += 1
+                assigned = True
+                break
+        if not assigned:
+            if pct >= 100:
+                zones[4]["count"] += 1  # Zone 5 includes 100%
+            else:
+                below_count += 1  # Below zone 1
+
+    # Calculate percentages
+    for z in zones:
+        z["pct"] = round(z["count"] / total_count * 100, 1) if total_count > 0 else 0
+
+    return zones
+
+
 def format_pace(pace_min_km: float | None) -> str:
     """Format pace as M:SS /km."""
     if pace_min_km is None:
@@ -185,6 +321,15 @@ def format_pace(pace_min_km: float | None) -> str:
     minutes = int(pace_min_km)
     seconds = int((pace_min_km - minutes) * 60)
     return f"{minutes}:{seconds:02d} /km"
+
+
+def format_pace_short(pace_min_km: float | None) -> str:
+    """Format pace as M:SS (no /km suffix)."""
+    if pace_min_km is None:
+        return "-"
+    minutes = int(pace_min_km)
+    seconds = int((pace_min_km - minutes) * 60)
+    return f"{minutes}:{seconds:02d}"
 
 
 def format_duration(seconds: float | None) -> str:
@@ -199,7 +344,7 @@ def format_duration(seconds: float | None) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def generate_csv_report(metrics: dict) -> bytes:
+def generate_csv_report(metrics: dict, km_splits: list[dict]) -> bytes:
     """Generate a CSV summary report."""
     output = io.StringIO()
     writer = csv.writer(output)
@@ -215,25 +360,17 @@ def generate_csv_report(metrics: dict) -> bytes:
 
     # Detailed per-km splits
     writer.writerow([])
-    writer.writerow(["Split (km)", "Pace (min/km)", "Heart Rate (bpm)"])
+    writer.writerow(["Split (km)", "Pace (min/km)", "GAP (min/km)", "Heart Rate (bpm)", "Elev Change (m)", "Grade (%)"])
 
-    if metrics["paces"]:
-        km_splits = {}
-        for p in metrics["paces"]:
-            km = int(p["dist"] / 1000)
-            if km not in km_splits:
-                km_splits[km] = {"paces": [], "hrs": []}
-            km_splits[km]["paces"].append(p["pace"])
-
-        for h in metrics["heart_rates"]:
-            km = int(h["dist"] / 1000)
-            if km in km_splits:
-                km_splits[km]["hrs"].append(h["hr"])
-
-        for km in sorted(km_splits.keys()):
-            avg_p = sum(km_splits[km]["paces"]) / len(km_splits[km]["paces"])
-            avg_h = sum(km_splits[km]["hrs"]) / len(km_splits[km]["hrs"]) if km_splits[km]["hrs"] else None
-            writer.writerow([f"{km + 1}", format_pace(avg_p), round(avg_h) if avg_h else "-"])
+    for split in km_splits:
+        writer.writerow([
+            f"{split['km']}",
+            format_pace_short(split["pace"]),
+            format_pace_short(split["gap"]),
+            split["hr"] if split["hr"] else "-",
+            split["elev_change"],
+            split["grade_pct"],
+        ])
 
     return output.getvalue().encode("utf-8-sig")
 
@@ -266,6 +403,8 @@ if uploaded_file is not None:
                 st.stop()
 
             metrics = compute_metrics(run_data["points"])
+            km_splits = compute_km_splits(metrics)
+            best_splits = find_best_splits(metrics)
 
         except Exception as e:
             st.error(f"{t('parse_error')}: {e}")
@@ -291,15 +430,43 @@ if uploaded_file is not None:
         with col6:
             st.metric(t("metric_max_hr"), f"{metrics['max_hr']} bpm")
 
+    # --- Best Splits ---
+    if best_splits["1km"] or best_splits["5km"]:
+        st.markdown(f"#### {t('best_splits_title')}")
+        best_cols = st.columns(2)
+        if best_splits["1km"]:
+            with best_cols[0]:
+                bs = best_splits["1km"]
+                st.success(
+                    f"🏅 {t('best_1km')}: **{format_pace(bs['pace'])}** "
+                    f"({format_duration(bs['time_seconds'])}) — "
+                    f"km {bs['start_km']:.1f} ~ {bs['end_km']:.1f}"
+                )
+        if best_splits["5km"]:
+            with best_cols[1]:
+                bs = best_splits["5km"]
+                st.success(
+                    f"🏅 {t('best_5km')}: **{format_pace(bs['pace'])}** "
+                    f"({format_duration(bs['time_seconds'])}) — "
+                    f"km {bs['start_km']:.1f} ~ {bs['end_km']:.1f}"
+                )
+
     st.markdown("---")
 
     # --- Charts ---
-    tab_map, tab_pace, tab_elev, tab_hr = st.tabs([
-        t("tab_map"), t("tab_pace"), t("tab_elevation"), t("tab_heart_rate")
-    ])
+    tab_labels = [
+        t("tab_map"), t("tab_pace"), t("tab_elevation"), t("tab_heart_rate"),
+        t("tab_splits"),
+    ]
+    if metrics["heart_rates"]:
+        tab_labels.append(t("tab_hr_zones"))
+        tab_labels.append(t("tab_pace_vs_hr"))
+
+    tabs = st.tabs(tab_labels)
+    tab_idx = 0
 
     # Map tab
-    with tab_map:
+    with tabs[tab_idx]:
         st.markdown(f"#### {t('route_map')}")
         try:
             import folium
@@ -335,9 +502,10 @@ if uploaded_file is not None:
             import pandas as pd
             map_df = pd.DataFrame([{"lat": p["lat"], "lon": p["lon"]} for p in points_with_coords])
             st.map(map_df)
+    tab_idx += 1
 
     # Pace tab
-    with tab_pace:
+    with tabs[tab_idx]:
         st.markdown(f"#### {t('pace_chart')}")
         if metrics["paces"]:
             import pandas as pd
@@ -359,9 +527,10 @@ if uploaded_file is not None:
                 st.bar_chart(df_pace, x="km", y=t("col_pace"))
         else:
             st.info(t("no_pace_data"))
+    tab_idx += 1
 
     # Elevation tab
-    with tab_elev:
+    with tabs[tab_idx]:
         st.markdown(f"#### {t('elevation_chart')}")
         if metrics["elevations"]:
             import pandas as pd
@@ -385,9 +554,10 @@ if uploaded_file is not None:
                 st.metric(t("metric_descent"), f"{metrics['total_descent_m']} m")
         else:
             st.info(t("no_elevation_data"))
+    tab_idx += 1
 
     # Heart rate tab
-    with tab_hr:
+    with tabs[tab_idx]:
         st.markdown(f"#### {t('hr_chart')}")
         if metrics["heart_rates"]:
             import pandas as pd
@@ -405,10 +575,171 @@ if uploaded_file is not None:
             st.line_chart(df_hr, x="km", y=t("col_hr"))
         else:
             st.info(t("no_hr_data"))
+    tab_idx += 1
+
+    # --- Splits Table tab ---
+    with tabs[tab_idx]:
+        st.markdown(f"#### {t('splits_table_title')}")
+        if km_splits:
+            import pandas as pd
+
+            # Determine which km has the best 1km split
+            best_1km_kms = set()
+            if best_splits["1km"]:
+                bs = best_splits["1km"]
+                start_km = int(bs["start_km"])
+                end_km = int(bs["end_km"])
+                for k in range(start_km + 1, end_km + 2):  # +1 because splits are 1-indexed
+                    best_1km_kms.add(k)
+
+            table_rows = []
+            for split in km_splits:
+                row = {
+                    "km": split["km"],
+                    t("col_pace"): format_pace_short(split["pace"]),
+                    t("col_gap"): format_pace_short(split["gap"]),
+                    t("col_elev_change"): f"{split['elev_change']:+.1f}",
+                    t("col_grade"): f"{split['grade_pct']:.1f}%",
+                }
+                if split["hr"] is not None:
+                    row[t("col_hr")] = split["hr"]
+                else:
+                    row[t("col_hr")] = "-"
+                table_rows.append(row)
+
+            df_splits = pd.DataFrame(table_rows)
+
+            # Highlight best 1km split rows
+            def highlight_best(row):
+                if row["km"] in best_1km_kms:
+                    return ["background-color: #d4edda"] * len(row)
+                return [""] * len(row)
+
+            if best_1km_kms:
+                styled = df_splits.style.apply(highlight_best, axis=1)
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(df_splits, use_container_width=True, hide_index=True)
+        else:
+            st.info(t("no_pace_data"))
+    tab_idx += 1
+
+    # --- HR Zones tab (only if HR data exists) ---
+    if metrics["heart_rates"]:
+        with tabs[tab_idx]:
+            st.markdown(f"#### {t('hr_zones_title')}")
+
+            # Max HR input
+            st.markdown(t("hr_zones_max_hr_explanation"))
+            hr_input_method = st.radio(
+                t("hr_zones_input_method"),
+                [t("hr_zones_use_age"), t("hr_zones_use_manual")],
+                horizontal=True,
+            )
+
+            if hr_input_method == t("hr_zones_use_age"):
+                age = st.number_input(t("hr_zones_age_label"), min_value=10, max_value=100, value=30)
+                user_max_hr = 220 - age
+                st.caption(f"{t('hr_zones_estimated_max')}: **{user_max_hr} bpm**")
+            else:
+                user_max_hr = st.number_input(
+                    t("hr_zones_manual_label"), min_value=100, max_value=250,
+                    value=metrics["max_hr"] if metrics["max_hr"] else 190,
+                )
+
+            zones = compute_hr_zones(metrics["heart_rates"], user_max_hr)
+
+            import pandas as pd
+
+            zone_names = {
+                1: t("hr_zone_1_name"),
+                2: t("hr_zone_2_name"),
+                3: t("hr_zone_3_name"),
+                4: t("hr_zone_4_name"),
+                5: t("hr_zone_5_name"),
+            }
+            zone_colors = {1: "#93c5fd", 2: "#86efac", 3: "#fde047", 4: "#fdba74", 5: "#fca5a5"}
+
+            # Percentage breakdown table
+            zone_table = []
+            for z in zones:
+                zone_table.append({
+                    t("col_zone"): f"Z{z['zone']}",
+                    t("col_zone_name"): zone_names[z["zone"]],
+                    t("col_zone_range"): f"{z['min_pct']}–{z['max_pct']}% ({int(user_max_hr * z['min_pct'] / 100)}–{int(user_max_hr * z['max_pct'] / 100)} bpm)",
+                    t("col_zone_pct"): f"{z['pct']}%",
+                })
+            df_zones = pd.DataFrame(zone_table)
+            st.dataframe(df_zones, use_container_width=True, hide_index=True)
+
+            # Horizontal stacked bar chart using st.html
+            bar_parts = []
+            for z in zones:
+                if z["pct"] > 0:
+                    color = zone_colors[z["zone"]]
+                    bar_parts.append(
+                        f'<div style="width:{z["pct"]}%;background:{color};height:40px;'
+                        f'display:inline-flex;align-items:center;justify-content:center;'
+                        f'font-size:12px;font-weight:bold;color:#333;">'
+                        f'Z{z["zone"]} {z["pct"]}%</div>'
+                    )
+
+            bar_html = (
+                '<div style="display:flex;width:100%;border-radius:8px;overflow:hidden;'
+                'margin:10px 0;">' + "".join(bar_parts) + '</div>'
+            )
+            st.markdown(bar_html, unsafe_allow_html=True)
+
+        tab_idx += 1
+
+        # --- Pace vs HR Scatter tab ---
+        with tabs[tab_idx]:
+            st.markdown(f"#### {t('pace_vs_hr_title')}")
+            if metrics["paces"] and metrics["heart_rates"]:
+                import pandas as pd
+
+                # Build per-km data with both pace and HR
+                km_pace_hr = {}
+                for p in metrics["paces"]:
+                    km = int(p["dist"] / 1000)
+                    if km not in km_pace_hr:
+                        km_pace_hr[km] = {"paces": [], "hrs": []}
+                    km_pace_hr[km]["paces"].append(p["pace"])
+
+                for h in metrics["heart_rates"]:
+                    km = int(h["dist"] / 1000)
+                    if km in km_pace_hr:
+                        km_pace_hr[km]["hrs"].append(h["hr"])
+
+                scatter_data = []
+                for km in sorted(km_pace_hr.keys()):
+                    d = km_pace_hr[km]
+                    if d["paces"] and d["hrs"]:
+                        avg_pace = sum(d["paces"]) / len(d["paces"])
+                        avg_hr = sum(d["hrs"]) / len(d["hrs"])
+                        scatter_data.append({
+                            t("col_hr"): round(avg_hr),
+                            t("col_pace"): round(avg_pace, 2),
+                            "km": km + 1,
+                        })
+
+                if scatter_data:
+                    df_scatter = pd.DataFrame(scatter_data)
+                    st.scatter_chart(
+                        df_scatter,
+                        x=t("col_hr"),
+                        y=t("col_pace"),
+                    )
+                    st.caption(t("pace_vs_hr_note"))
+                else:
+                    st.info(t("no_pace_hr_data"))
+            else:
+                st.info(t("no_pace_hr_data"))
+        tab_idx += 1
 
     # --- Download CSV ---
     st.markdown("---")
-    csv_bytes = generate_csv_report(metrics)
+    csv_bytes = generate_csv_report(metrics, km_splits)
     st.download_button(
         label=t("download_csv"),
         data=csv_bytes,
