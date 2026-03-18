@@ -69,5 +69,6 @@
   "hr_zone_5_name": "最大",
   "pace_vs_hr_title": "ペース vs 心拍数 散布図",
   "pace_vs_hr_note": "各km区間の平均ペースと平均心拍数のプロット。ペース値が小さいほど速いことを意味します。",
-  "no_pace_hr_data": "ペースと心拍数の両方のデータが必要です"
+  "no_pace_hr_data": "ペースと心拍数の両方のデータが必要です",
+  "report_issue": "不具合を報告"
 }
