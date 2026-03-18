@@ -1,0 +1,6 @@
+streamlit>=1.30.0
+fitparse>=0.0.7
+gpxpy>=1.6.0
+folium>=0.15.0
+streamlit-folium>=0.17.0
+pandas>=2.0.0
