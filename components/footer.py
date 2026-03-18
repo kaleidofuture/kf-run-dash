@@ -24,7 +24,7 @@ def render_footer(libraries: list[str] | None = None, repo_name: str = ""):
             for lib in libraries:
                 st.markdown(f"- `{lib}`")
 
-    issue_url = f"https://github.com/kaleidofuture/{repo_name}/issues" if repo_name else ""
+    issue_url = "https://docs.google.com/forms/d/e/1FAIpQLSfAAbh5M_aJAHYCNsFFs4JqvfBx9J3m0YGuO9juxOpdjfHNWA/viewform"
 
     issue_html = f'<br>🐛 <a href="{issue_url}" target="_blank" style="color:#aaa;">{t("report_issue")}</a>' if issue_url else ""
 
