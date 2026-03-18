@@ -398,7 +398,7 @@ if uploaded_file is not None:
                 st.error(t("unsupported_format"))
                 st.stop()
 
-            if not run_data["points"]:
+            if len(run_data["points"]) < 2:
                 st.error(t("no_gps_data"))
                 st.stop()
 
